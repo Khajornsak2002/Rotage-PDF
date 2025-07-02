@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rotate PDF Pages & Download</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- pdf‑lib (เขียนไฟล์ PDF) -->
+  <script src="https://cdn.jsdelivr.net/npm/pdf-lib/dist/pdf-lib.min.js"></script>
+  
+  <!-- pdf.js (แสดงตัวอย่าง) – เวอร์ชัน 2 ที่เสถียร -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+  </script>
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111827;
+      --card: #1f2937;
+      --primary: #3b82f6;
+      --primary-hover: #60a5fa;
+      --success: #4ade80;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 1.5rem;
+      font-family: system-ui, sans-serif;
+      background: var(--bg);
+      color: #f3f4f6;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+    }
+    input[type="file"], button {
+      padding: 0.6rem 1rem;
+      border-radius: 0.5rem;
+      font-weight: 600;
+    }
+    input[type="file"] {
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: #e5e7eb;
+    }
+    button {
+      border: none;
+      background: var(--primary);
+      color: #fff;
+      cursor: pointer;
+      transition: transform .15s, background .2s;
+    }
+    button:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+
+    #preview-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 1rem;
+    }
+    .thumb-wrapper {
+      position: relative;
+      background: var(--card);
+      border: 2px solid transparent;
+      border-radius: .5rem;
+      overflow: hidden;
+      cursor: pointer;
+      transition: border .2s, transform .25s;
+    }
+    .thumb-wrapper:hover { transform: translateY(-3px); }
+    .thumb-wrapper.selected { border-color: var(--success); }
+    canvas { width: 100%; background: #0f172a; display:block; }
+    .badge {
+      position: absolute; bottom: 6px; right: 6px;
+      padding: 2px 6px; font-size: 12px;
+      background: rgba(0,0,0,.55); border-radius: .25rem;
+    }
+    a.download-link { color: var(--success); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <label>เลือกไฟล์ PDF: <input id="file-input" type="file" accept="application/pdf" /></label>
+    <button id="clear-btn"  disabled>ล้างการหมุน</button>
+    <button id="download-btn" disabled>ดาวน์โหลดไฟล์ PDF</button>
+  </header>
+
+  <div id="preview-container"></div>
+  <a id="download-link" class="download-link" style="display:none"></a>
+
+  <script>
+    // ===== ELEMENTS =====
+    const fileInput   = document.getElementById('file-input');
+    const clearBtn    = document.getElementById('clear-btn');
+    const downloadBtn = document.getElementById('download-btn');
+    const grid        = document.getElementById('preview-container');
+    const dlink       = document.getElementById('download-link');
+
+    // ===== STATE =====
+    let pdfBuffer      = null;
+    let baseRot        = []; // existing rotation per page
+    let deltaRot       = []; // extra rotation by user (‑180,‑90,0,90,180,270)
+    let pages          = [];
+
+    // ===== LISTENERS =====
+    fileInput.addEventListener('change', loadFile);
+    clearBtn.addEventListener('click', clearAll);
+    downloadBtn.addEventListener('click', savePdf);
+
+    async function loadFile() {
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      pdfBuffer = await file.arrayBuffer();
+      grid.textContent = 'กำลังโหลด…';
+      dlink.style.display = 'none';
+      downloadBtn.disabled = true; // re‑enable later
+
+      const pdf = await pdfjsLib.getDocument({ data: pdfBuffer }).promise;
+      const n   = pdf.numPages;
+      baseRot  = Array(n).fill(0);
+      deltaRot = Array(n).fill(0);
+      pages    = [];
+      grid.innerHTML = '';
+
+      for (let i=1;i<=n;i++) {
+        const page = await pdf.getPage(i);
+        pages.push(page);
+        baseRot[i-1] = page.rotate || 0; // pdf.js returns CW degrees
+
+        const wrap  = document.createElement('div');
+        wrap.className = 'thumb-wrapper';
+        const canvas = document.createElement('canvas');
+        const badge  = document.createElement('div');
+        badge.className = 'badge';
+        wrap.append(canvas,badge);
+        grid.appendChild(wrap);
+
+        renderThumb(i-1);
+
+        // Left‑click → rotate CW 90, right‑click → CCW 90
+        wrap.addEventListener('click', e => {
+          e.preventDefault();
+          rotatePage(i-1, 90);
+        });
+        wrap.addEventListener('contextmenu', e => {
+          e.preventDefault();
+          rotatePage(i-1, -90);
+        });
+      }
+
+      clearBtn.disabled    = false;
+      downloadBtn.disabled = false; // ✅ allow download even if no rotation
+    }
+
+    function rotatePage(idx, step) {
+      deltaRot[idx] = (deltaRot[idx] + step + 360) % 360;
+      renderThumb(idx);
+    }
+
+    async function renderThumb(idx) {
+      const page   = pages[idx];
+      const wrap   = grid.children[idx];
+      const canvas = wrap.querySelector('canvas');
+      const badge  = wrap.querySelector('.badge');
+
+      const total  = (baseRot[idx] + deltaRot[idx]) % 360;
+      const viewport = page.getViewport({ scale:0.25, rotation: total });
+      canvas.width  = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      badge.textContent = `${total}°`;
+      badge.style.display = total ? 'block':'none';
+      wrap.classList.toggle('selected', !!total);
+    }
+
+    function clearAll() {
+      deltaRot.fill(0);
+      pages.forEach((_,i)=>renderThumb(i));
+    }
+
+    async function savePdf() {
+      if (!pdfBuffer) return;
+
+      const { PDFDocument, degrees } = PDFLib;
+      const doc = await PDFDocument.load(pdfBuffer);
+      doc.getPages().forEach((p,idx)=>{
+        const ang = (baseRot[idx] + deltaRot[idx]) % 360;
+        p.setRotation(degrees(ang));
+      });
+
+      const bytes = await doc.save();
+      const blob  = new Blob([bytes],{type:'application/pdf'});
+      const url   = URL.createObjectURL(blob);
+      dlink.href = url;
+      dlink.download = `rotated-${fileInput.files[0]?.name||'file'}`;
+      //dlink.textContent = '📥 ดาวน์โหลดไฟล์ PDF';
+      dlink.style.display = 'block';
+      dlink.click();
+    }
+  </script>
+</body>
+</html>
